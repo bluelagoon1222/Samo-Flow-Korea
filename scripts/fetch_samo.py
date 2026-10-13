@@ -204,11 +204,12 @@ def aggregate(dates):
                 d0[7] if d0 else None,
                 d0[3] if d0 else 0,
                 d0[4] if d0 else 0,
+                list(reversed(na)),
             ])
         totals = [sum(v[1] for v in pd_.values()) for pd_ in reversed(per_day)]
         out["markets"][m] = {"totals": totals, "rows": rows}
     out["columns"] = ["code", "name", "na1", "na5", "na20", "nv1", "nv5", "nv20",
-                      "streak", "close", "chg", "tv1", "buy1", "sell1"]
+                      "streak", "close", "chg", "tv1", "buy1", "sell1", "hist"]
     return out
 
 
