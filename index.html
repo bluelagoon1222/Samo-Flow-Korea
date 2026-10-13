@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>사모펀드 수급 CHECK</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Nanum+Gothic:wght@400;700;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{
+  --orange:#F58220; --navy:#043B72; --ink:#1d2433; --sub:#5d6675; --line:#e3e6eb;
+  --bg:#ffffff; --panel:#f6f7f9; --up:#d6322c; --down:#1d5fd1;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+*,*:before,*:after{box-sizing:inherit}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Nanum Gothic","Apple SD Gothic Neo","Malgun Gothic",Dotum,sans-serif;font-size:15px;line-height:1.5}
+.wrap{max-width:1080px;margin:0 auto;padding:20px 16px 40px}
+header{border-bottom:3px solid var(--orange);padding-bottom:14px;margin-bottom:18px;
+  display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:10px}
+h1{margin:0;font-size:26px;font-weight:800;color:var(--navy);letter-spacing:-.5px}
+h1 small{display:block;font-size:13px;font-weight:400;color:var(--sub);letter-spacing:0;margin-top:4px}
+.asof{font-size:13px;color:var(--sub);text-align:right}
+.asof b{color:var(--ink);font-size:15px}
+.sum{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:18px}
+.sum div{background:var(--panel);border-left:4px solid var(--navy);padding:12px 14px}
+.sum span{display:block;font-size:13px;color:var(--sub)}
+.sum strong{font-size:22px;font-weight:800}
+.chartbox{border:1px solid var(--line);padding:12px;margin-bottom:18px}
+.chartbox h2,.rank h2{font-size:16px;margin:0 0 8px;color:var(--navy)}
+.chartwrap{position:relative;height:200px}
+.ctrl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.seg{display:inline-flex;border:1px solid var(--navy);border-radius:4px;overflow:hidden}
+.seg button{border:0;background:#fff;color:var(--navy);padding:7px 12px;font:inherit;font-size:14px;cursor:pointer}
+.seg button+button{border-left:1px solid var(--navy)}
+.seg button[aria-pressed="true"]{background:var(--navy);color:#fff;font-weight:700}
+.seg button:focus-visible,input:focus-visible{outline:3px solid var(--orange);outline-offset:1px}
+input[type=search]{flex:1;min-width:150px;padding:7px 10px;border:1px solid var(--line);border-radius:4px;font:inherit;font-size:14px}
+.tbl{overflow-x:auto;border-top:2px solid var(--navy)}
+table{width:100%;border-collapse:collapse;font-size:14px;white-space:nowrap}
+th{background:var(--panel);color:var(--sub);font-weight:700;padding:8px 6px;text-align:right;border-bottom:1px solid var(--line)}
+td{padding:8px 6px;text-align:right;border-bottom:1px solid var(--line)}
+th:nth-child(1),td:nth-child(1){text-align:center;width:40px}
+th:nth-child(2),td:nth-child(2){text-align:left}
+td a{color:var(--ink);text-decoration:none;font-weight:700}
+td a:hover{text-decoration:underline}
+td .code{color:var(--sub);font-size:12px;font-weight:400;margin-left:4px}
+td.key{font-weight:800}
+.up{color:var(--up)} .down{color:var(--down)}
+tbody tr:nth-child(-n+3) td:first-child{color:var(--orange);font-weight:800}
+.note{font-size:12px;color:var(--sub);margin-top:18px;line-height:1.7}
+.note b{color:var(--ink)}
+.empty{padding:28px 10px;text-align:center;color:var(--sub)}
+@media (max-width:640px){
+  h1{font-size:22px}
+  .sum strong{font-size:18px}
+  .hide-m{display:none}
+  table{font-size:13px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>사모펀드 수급 CHECK<small>KRX 투자자구분 ‘사모’ 종목별 순매수·순매도 순위</small></h1>
+    <div class="asof">기준일 <b id="asof">-</b><br><span id="gen"></span></div>
+  </header>
+
+  <section class="sum" id="sum"></section>
+
+  <section class="chartbox">
+    <h2 id="chartTitle">사모 일별 순매수 합계 (억원)</h2>
+    <div class="chartwrap"><canvas id="chart" aria-label="일별 사모 순매수 합계 막대 차트"></canvas></div>
+  </section>
+
+  <section class="rank">
+    <h2 id="rankTitle">순위</h2>
+    <div class="ctrl">
+      <div class="seg" id="mkt"><button aria-pressed="true" data-v="KOSPI">KOSPI</button><button data-v="KOSDAQ">KOSDAQ</button></div>
+      <div class="seg" id="win"><button aria-pressed="true" data-v="1">1일</button><button data-v="5">5일</button><button data-v="20">20일</button></div>
+      <div class="seg" id="dir"><button aria-pressed="true" data-v="buy">순매수 상위</button><button data-v="sell">순매도 상위</button></div>
+      <input type="search" id="q" placeholder="종목명·코드 검색" aria-label="종목 검색">
+    </div>
+    <div class="tbl">
+      <table>
+        <thead><tr>
+          <th>순위</th><th>종목</th><th id="hKey">순매수대금(억원)</th><th class="hide-m" id="hVol">순매수량(주)</th>
+          <th>연속</th><th class="hide-m">종가(원)</th><th>등락률</th><th class="hide-m">거래대금 대비</th>
+        </tr></thead>
+        <tbody id="tb"><tr><td colspan="8" class="empty">데이터를 불러오는 중입니다.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="note">
+    <b>출처</b> KRX 정보데이터시스템 투자자별 거래실적(투자자구분: 사모) — 수집 후 집계 [확정: KRX 공표치]<br>
+    <b>사모</b> KRX 기관 7개 구분(금융투자·보험·투신·사모·은행·기타금융·연기금 등) 중 사모집합투자기구(PEF(Private Equity Fund, 사모투자펀드)·헤지펀드 등) 계좌 합산<br>
+    <b>5일·20일</b> 직전 N거래일 일별 순매수의 단순 합계 [계산값] · <b>연속</b> 기준일부터 거꾸로 센 연속 순매수(+)·순매도(−) 일수 [계산값]<br>
+    <b>거래대금 대비</b> 기준일 사모 순매수대금 ÷ 해당 종목 KRX 거래대금 [계산값, 1일 기준만 표시]<br>
+    <b>유의</b> NXT(넥스트레이드, 대체거래소) 체결분은 KRX 통계에 포함되지 않을 수 있음 [미확인] · 평일 18:30·익일 08:00 자동 갱신, 18시 이전 조회분은 18시 이후 재조회로 덮어씀
+  </p>
+</div>
+
+<script>
+const EOK = 1e8;
+const st = {mkt:"KOSPI", win:"1", dir:"buy", q:""};
+let D = null, chart = null;
+const $ = s => document.querySelector(s);
+const fmt = (v, d=0) => v==null ? "-" : v.toLocaleString("ko-KR",{minimumFractionDigits:d,maximumFractionDigits:d});
+const sgn = v => v>0 ? "up" : v<0 ? "down" : "";
+const eok = v => (v>0?"+":"") + fmt(v/EOK,1);
+const dfmt = d => `${d.slice(0,4)}.${d.slice(4,6)}.${d.slice(6)}`;
+
+function seg(id, key){
+  $(id).addEventListener("click", e=>{
+    const b = e.target.closest("button"); if(!b) return;
+    $(id).querySelectorAll("button").forEach(x=>x.setAttribute("aria-pressed", x===b));
+    st[key] = b.dataset.v; render();
+  });
+}
+seg("#mkt","mkt"); seg("#win","win"); seg("#dir","dir");
+$("#q").addEventListener("input", e=>{st.q=e.target.value.trim(); render();});
+
+fetch("data/latest.json?ts="+Date.now())
+  .then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); })
+  .then(j=>{ D=j; header(); render(); })
+  .catch(()=>{
+    $("#tb").innerHTML = '<tr><td colspan="8" class="empty">아직 수집된 데이터가 없습니다. 저장소 Actions 탭에서 첫 실행이 끝나면 표시됩니다.</td></tr>';
+  });
+
+function header(){
+  $("#asof").textContent = dfmt(D.asof);
+  $("#gen").textContent = "갱신 " + D.generated_at.replace("T"," ").slice(0,16) + " KST";
+  $("#sum").innerHTML = ["KOSPI","KOSDAQ"].map(m=>{
+    const t = D.markets[m].totals, v = t[t.length-1];
+    return `<div><span>${m} 사모 순매수 합계 (기준일)</span><strong class="${sgn(v)}">${eok(v)}억원</strong></div>`;
+  }).join("");
+}
+
+function drawChart(){
+  if(typeof Chart==="undefined") return;
+  const t = D.markets[st.mkt].totals.map(v=>+(v/EOK).toFixed(1));
+  const labels = D.days.map(d=>`${d.slice(4,6)}/${d.slice(6)}`);
+  $("#chartTitle").textContent = `${st.mkt} 사모 일별 순매수 합계 (억원, 최근 ${D.days.length}거래일)`;
+  const colors = t.map(v=> v>=0 ? "#F58220" : "#9aa3b0");
+  if(chart){ chart.data.labels=labels; chart.data.datasets[0].data=t; chart.data.datasets[0].backgroundColor=colors; chart.update(); return; }
+  chart = new Chart($("#chart"), {
+    type:"bar",
+    data:{labels, datasets:[{data:t, backgroundColor:colors, borderRadius:2}]},
+    options:{responsive:true, maintainAspectRatio:false, animation:false,
+      plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>` ${fmt(c.raw,1)}억원`}}},
+      scales:{x:{grid:{display:false}}, y:{grid:{color:"#eef0f3"}, ticks:{callback:v=>fmt(v)}}}}
+  });
+}
+
+function render(){
+  if(!D) return;
+  drawChart();
+  const C = D.columns, ix = k => C.indexOf(k);
+  const w = st.win, avail = Math.min(+w, D.days.length);
+  const kA = ix("na"+w), kV = ix("nv"+w);
+  const wl = avail < +w ? `${w}일(가용 ${avail}일)` : `${w}일`;
+  $("#hKey").textContent = `${wl} 순매수대금(억원)`;
+  $("#hVol").textContent = `${wl} 순매수량(주)`;
+  $("#rankTitle").textContent = `${st.mkt} 사모 ${st.dir==="buy"?"순매수":"순매도"} 상위 · ${wl} 누적`;
+
+  let rows = D.markets[st.mkt].rows.slice();
+  rows.sort((a,b)=> st.dir==="buy" ? b[kA]-a[kA] : a[kA]-b[kA]);
+  rows = rows.map((r,i)=>[i+1, r]);
+  if(st.q){
+    const q = st.q.toLowerCase();
+    rows = rows.filter(([,r])=> r[0].includes(q) || r[1].toLowerCase().includes(q));
+  } else {
+    rows = rows.filter(([,r])=> st.dir==="buy" ? r[kA]>0 : r[kA]<0).slice(0,30);
+  }
+  if(!rows.length){ $("#tb").innerHTML='<tr><td colspan="8" class="empty">조건에 맞는 종목이 없습니다.</td></tr>'; return; }
+
+  $("#tb").innerHTML = rows.map(([rk,r])=>{
+    const a=r[kA], v=r[kV], s=r[ix("streak")], chg=r[ix("chg")], tv=r[ix("tv1")], n1=r[ix("na1")];
+    const ratio = (w==="1" && tv) ? (n1/tv*100) : null;
+    return `<tr>
+      <td>${rk}</td>
+      <td><a href="https://finance.naver.com/item/main.naver?code=${r[0]}" target="_blank" rel="noopener">${r[1]}</a><span class="code">${r[0]}</span></td>
+      <td class="key ${sgn(a)}">${eok(a)}</td>
+      <td class="hide-m ${sgn(v)}">${(v>0?"+":"")+fmt(v)}</td>
+      <td class="${sgn(s)}">${s>0?"+"+s:s}</td>
+      <td class="hide-m">${fmt(r[ix("close")])}</td>
+      <td class="${sgn(chg)}">${chg==null?"-":(chg>0?"+":"")+fmt(chg,2)+"%"}</td>
+      <td class="hide-m ${sgn(ratio)}">${ratio==null?"-":(ratio>0?"+":"")+fmt(ratio,1)+"%"}</td>
+    </tr>`;
+  }).join("");
+}
+</script>
+</body>
+</html>
