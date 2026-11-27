@@ -67,6 +67,44 @@ def save_json(p, obj):
 
 
 # ───────────────────────── KRX 로그인·거래일 ─────────────────────────
+def krx_login_reason(login_id, login_pw):
+    """로그인 실패 시 KRX 가 돌려준 사유(오류 코드/메시지)를 읽어 출력한다.
+
+    pykrx 는 실패를 False 로만 돌려줘 원인을 알 수 없다. 아이디 미존재(CD005),
+    비밀번호 오류, 비밀번호 변경 필요(CD010) 등을 구분해 로그에 남긴다.
+    """
+    try:
+        import requests
+        from pykrx.website.comm import auth as krx_auth
+    except Exception as e:
+        print(f"[auth] 사유 조회 준비 실패: {e}")
+        return
+    hints = {
+        "CD005": "KRX 에 없는 아이디입니다. KRX_ID 값을 확인하세요.",
+        "CD010": "비밀번호 변경이 필요합니다. data.krx.co.kr 에서 변경하세요.",
+        "CD011": "이미 다른 곳에서 로그인 중입니다(중복 로그인).",
+    }
+    try:
+        s = requests.Session()
+        krx_auth.warmup_krx_session(s)
+        payload = {"mbrNm": "", "telNo": "", "di": "", "certType": "",
+                   "mbrId": login_id, "pw": login_pw}
+        r = s.post(krx_auth.LOGIN_URL, data=payload,
+                   headers={"User-Agent": krx_auth.USER_AGENT, "Referer": krx_auth.LOGIN_PAGE},
+                   timeout=15)
+        data = r.json()
+        code = str(data.get("_error_code", ""))
+        msg = str(data.get("_error_message", ""))
+        print(f"[auth] KRX 응답 코드: {code or '(없음)'} / 메시지: {msg or '(없음)'}")
+        if code in hints:
+            print(f"[auth] {hints[code]}")
+        # 아이디는 존재하는데 비밀번호만 다른 경우
+        if code and code not in hints:
+            print("[auth] 아이디는 인식되었고 비밀번호가 맞지 않거나 다른 사유로 거부되었습니다.")
+    except Exception as e:
+        print(f"[auth] 사유 조회 실패: {type(e).__name__}: {e}")
+
+
 def krx_session():
     """pykrx 가 만든 KRX 로그인 세션을 돌려준다. 로그인 실패면 None.
 
@@ -319,12 +357,20 @@ def same_data(a, b):
 
 
 def main():
+    # 붙여넣기로 딸려온 앞뒤 공백·개행 제거 (그대로면 KRX 가 비밀번호 불일치로 거부한다)
+    for k in ("KRX_ID", "KRX_PW"):
+        v = os.getenv(k)
+        if v is not None and v != v.strip():
+            print(f"[auth] {k} 값 앞뒤 공백/개행을 제거했습니다.")
+            os.environ[k] = v.strip()
+
     if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
         print("[fatal] KRX_ID / KRX_PW 가 없습니다. GitHub 저장소 Settings → Secrets and variables → "
               "Actions 에서 등록하세요.")
         sys.exit(EXIT_AUTH)
 
     if krx_session() is None:
+        krx_login_reason(os.environ["KRX_ID"], os.environ["KRX_PW"])
         print("[fatal] KRX 로그인 실패. GitHub 저장소 Settings → Secrets and variables → Actions 의 "
               "KRX_ID / KRX_PW 값을 확인하세요. (데이터는 갱신하지 않습니다)")
         sys.exit(EXIT_AUTH)
