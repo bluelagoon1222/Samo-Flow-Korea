@@ -1,2 +1,2 @@
-pykrx
+pykrx>=1.2.9,<1.3
 pandas

@@ -4,6 +4,14 @@ Samo-Flow-Korea : KRX 투자자구분 '사모' 종목별 순매수 수집기
 - 출처: KRX 정보데이터시스템 (pykrx 경유, KRX 회원 로그인 필요)
 - 필요 환경변수: KRX_ID, KRX_PW  (GitHub Secrets)
 - 산출물: data/daily/YYYYMMDD.json (일별 원자료), data/latest.json (사이트용 집계)
+
+- 안전장치 (2026-11-27 수정: KRX 로그인 실패가 '휴장일'로 기록되던 문제)
+  * 시작할 때 KRX 로그인 세션을 먼저 확인한다. 실패하면 아무 데이터도 쓰지 않고
+    종료코드 2로 끝낸다. (로그인 실패 → 빈 응답 → 휴장일 기록 → 그 날짜 영구 누락 방지)
+  * 휴장일은 KRX 거래일 캘린더로만 판정한다. 캘린더를 받지 못하면 휴장일을 추가하지 않는다.
+  * 기대 거래일(가장 최근 거래일) 데이터를 받지 못하면 종료코드 3으로 끝내,
+    워크플로가 조용히 성공한 것처럼 보이지 않게 한다. (커밋 단계도 실행되지 않는다)
+  * 직전에 공개한 latest.json 보다 기준일(asof)이 뒤로 가지 않도록 막는다.
 """
 import os
 import sys
@@ -25,8 +33,12 @@ INVESTOR = "사모"
 N_DAYS = 20            # 누적 최대 거래일 수
 LOOKBACK_CAL = 45      # 최대 탐색 달력일
 MAX_FETCH = 30         # 1회 실행 시 최대 신규 조회 일수
-SLEEP = float(os.getenv("KRX_SLEEP","1.2"))            # KRX 차단 방지 지연(초)
+SLEEP = float(os.getenv("KRX_SLEEP", "1.2"))            # KRX 차단 방지 지연(초)
 READY_HOUR = 18        # 이 시각(KST) 이전 조회분은 잠정치로 보고 재조회
+RETRY = 2              # 하루치 조회 실패 시 재시도 횟수
+
+EXIT_AUTH = 2          # 자격 증명/로그인 문제
+EXIT_DATA = 3          # 데이터 수집 실패
 
 
 def now_kst():
@@ -54,8 +66,43 @@ def save_json(p, obj):
     Path(p).write_text(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
 
+# ───────────────────────── KRX 로그인·거래일 ─────────────────────────
+def krx_session():
+    """pykrx 가 만든 KRX 로그인 세션을 돌려준다. 로그인 실패면 None.
+
+    로그인 개념이 없는 옛 pykrx 버전이면 'not_required' 를 돌려준다.
+    """
+    try:
+        from pykrx.website.comm import auth as krx_auth
+    except ImportError:
+        print("[auth] pykrx 에 로그인 모듈이 없습니다 (로그인 불필요 버전으로 간주)")
+        return "not_required"
+    try:
+        return krx_auth.get_auth_session()
+    except Exception as e:
+        print(f"[auth] 세션 확인 중 오류: {e}")
+        return None
+
+
+def krx_trading_days(start, end):
+    """KRX 거래일 집합(YYYYMMDD). 조회에 실패하거나 결과가 비면 None."""
+    try:
+        days = stock.get_previous_business_days(
+            fromdate=start.strftime("%Y%m%d"), todate=end.strftime("%Y%m%d")
+        )
+    except Exception as e:
+        print(f"[calendar] 거래일 캘린더 조회 실패: {e}")
+        return None
+    cal = {d.strftime("%Y%m%d") for d in (days or [])}
+    if not cal:
+        print("[calendar] 거래일 캘린더가 비어 있습니다.")
+        return None
+    return cal
+
+
+# ───────────────────────── 수집 ─────────────────────────
 def fetch_day(d):
-    """d='YYYYMMDD'. 반환: {market: {ticker: [name, net_amt, net_vol, buy_amt, sell_amt, close, chg, tv]}} 또는 None(휴장/미집계)"""
+    """d='YYYYMMDD'. 반환: {market: {ticker: [name, net_amt, net_vol, buy_amt, sell_amt, close, chg, tv]}} 또는 None(미집계)"""
     result = {}
     for m in MARKETS:
         net = stock.get_market_net_purchases_of_equities(d, d, m, INVESTOR)
@@ -101,24 +148,56 @@ def fetch_day(d):
 
 
 def collect_days():
+    """일별 원자료 수집.
+
+    반환: {dates, missing, errors, expected, pruned}
+      dates   : 사용 가능한 거래일(최신순)
+      missing : 거래일인데 데이터가 비어 있는 날짜
+      errors  : 오류 메시지
+      expected: 가장 최근에 있어야 할 거래일
+      pruned  : 휴장일 목록에서 잘못 들어가 있어 제거한 실제 거래일
+    """
     meta = load_json(META_FILE, {"holidays": []})
     holidays = set(meta.get("holidays", []))
+    errors = []
     now = now_kst()
     today = now.date()
+    today_s = today.strftime("%Y%m%d")
 
-    dates, fetched = [], 0
+    start = today - dt.timedelta(days=LOOKBACK_CAL + 10)
+    cal = krx_trading_days(start, today)
+    if cal is None:
+        # 캘린더 없이 '빈 응답'만으로 휴장일을 판정하면 이번 사고가 재발한다.
+        raise RuntimeError(
+            "KRX 거래일 캘린더를 받지 못했습니다. 로그인/네트워크 상태를 확인하세요. "
+            "(휴장일 판정을 하지 않습니다)"
+        )
+
+    # 실제 거래일이 휴장일로 잘못 들어가 있으면 바로잡는다
+    pruned = sorted(d for d in holidays if d in cal)
+    if pruned:
+        print(f"[fix] 휴장일 목록에서 실제 거래일 제거: {', '.join(pruned)}")
+        holidays -= set(pruned)
+
+    dates, fetched, missing = [], 0, []
     for back in range(LOOKBACK_CAL):
         day = today - dt.timedelta(days=back)
         if day.weekday() >= 5:
             continue
         d = day.strftime("%Y%m%d")
-        if d in holidays:
-            continue
         if day == today and now.hour < 16:
             continue  # 장 마감 전
-
         f = DAILY_DIR / f"{d}.json"
         cached = load_json(f, None)
+
+        # 휴장일 판정: KRX 거래일 캘린더 기준 (지난 날짜만)
+        if d not in cal:
+            if day < today and cached is None:
+                if d not in holidays:
+                    print(f"[holiday] {d}")
+                holidays.add(d)
+            continue
+
         need = cached is None
         if cached is not None:
             fa = dt.datetime.fromisoformat(cached["fetched_at"])
@@ -127,21 +206,26 @@ def collect_days():
                 need = True  # 잠정 조회분 → 재조회
 
         if need and fetched < MAX_FETCH:
-            print(f"[fetch] {d}")
-            try:
-                data = fetch_day(d)
-            except Exception as e:
-                print(f"[error] {d}: {e}")
-                if cached is None:
-                    raise
-                data = None
             fetched += 1
+            print(f"[fetch] {d}")
+            data = None
+            for attempt in range(1, RETRY + 1):
+                try:
+                    data = fetch_day(d)
+                except Exception as e:
+                    print(f"[error] {d}: {e} (시도 {attempt}/{RETRY})")
+                    errors.append(f"{d}: {e}")
+                    data = None
+                if data is not None:
+                    break
+                if attempt < RETRY:
+                    time.sleep(SLEEP * 2)
             if data is None:
-                if day < today and cached is None:
-                    holidays.add(d)
-                    print(f"[holiday/empty] {d}")
                 if cached is None:
+                    missing.append(d)
+                    print(f"[missing] {d}: 거래일이지만 사모 순매수 데이터가 비어 있습니다")
                     continue
+                print(f"[keep] {d}: 새 데이터를 못 받아 기존 파일을 유지합니다")
             else:
                 cached = {"date": d, "fetched_at": now.isoformat(), "markets": data}
                 save_json(f, cached)
@@ -152,6 +236,7 @@ def collect_days():
             break
 
     meta["holidays"] = sorted(holidays)[-200:]
+    meta["errors"] = errors[-20:]
     save_json(META_FILE, meta)
 
     # 창 밖 파일 정리
@@ -159,7 +244,18 @@ def collect_days():
     for p in DAILY_DIR.glob("*.json"):
         if p.stem not in keep and p.stem < (min(dates) if dates else "0"):
             p.unlink()
-    return sorted(dates, reverse=True)
+
+    # 가장 최근에 있어야 할 거래일
+    ready = [d for d in cal if d < today_s or (d == today_s and now.hour >= READY_HOUR)]
+    expected = max(ready) if ready else None
+
+    return {
+        "dates": sorted(dates, reverse=True),
+        "missing": sorted(missing),
+        "errors": errors,
+        "expected": expected,
+        "pruned": pruned,
+    }
 
 
 def aggregate(dates):
@@ -206,6 +302,8 @@ def aggregate(dates):
                 d0[4] if d0 else 0,
                 list(reversed(na)),
             ])
+        # 행 순서를 고정한다(집합 순회 순서는 실행마다 달라져 같은 데이터도 매번 커밋이 생김)
+        rows.sort(key=lambda r: (-r[2], r[0]))
         totals = [sum(v[1] for v in pd_.values()) for pd_ in reversed(per_day)]
         out["markets"][m] = {"totals": totals, "rows": rows}
     out["columns"] = ["code", "name", "na1", "na5", "na20", "nv1", "nv5", "nv20",
@@ -213,15 +311,61 @@ def aggregate(dates):
     return out
 
 
+def same_data(a, b):
+    """generated_at 만 다른 동일 데이터인지"""
+    def strip(o):
+        return {k: v for k, v in o.items() if k != "generated_at"}
+    return isinstance(a, dict) and strip(a) == strip(b)
+
+
 def main():
-    if not os.getenv("KRX_ID") or not os.getenv("KRX_PW"):
-        print("[warn] KRX_ID / KRX_PW 환경변수가 없습니다. GitHub Secrets 등록을 확인하세요.")
-    dates = collect_days()
+    if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
+        print("[fatal] KRX_ID / KRX_PW 가 없습니다. GitHub 저장소 Settings → Secrets and variables → "
+              "Actions 에서 등록하세요.")
+        sys.exit(EXIT_AUTH)
+
+    if krx_session() is None:
+        print("[fatal] KRX 로그인 실패. GitHub 저장소 Settings → Secrets and variables → Actions 의 "
+              "KRX_ID / KRX_PW 값을 확인하세요. (데이터는 갱신하지 않습니다)")
+        sys.exit(EXIT_AUTH)
+
+    try:
+        res = collect_days()
+    except RuntimeError as e:
+        print(f"[fatal] {e}")
+        sys.exit(EXIT_DATA)
+
+    dates, expected = res["dates"], res["expected"]
     if not dates:
-        print("[error] 수집된 거래일이 없습니다.")
-        sys.exit(1)
-    save_json(OUT_FILE, aggregate(dates))
-    print(f"[done] asof={dates[0]} days={len(dates)}")
+        print("[fatal] 수집된 거래일이 없습니다.")
+        sys.exit(EXIT_DATA)
+
+    if expected and expected not in dates:
+        # 기대 거래일이 빠진 채로 공개 데이터를 다시 쓰지 않는다.
+        print(f"[fatal] 기대 거래일 {expected} 데이터를 받지 못했습니다 (asof={dates[0]}). "
+              "공개 데이터는 그대로 두고 종료합니다.")
+        for m in res["missing"]:
+            print(f"[fatal] 빈 응답: {m}")
+        sys.exit(EXIT_DATA)
+
+    old = load_json(OUT_FILE, None)
+    old_asof = (old or {}).get("asof")
+    out = aggregate(dates)
+    if old_asof and out["asof"] < old_asof:
+        print(f"[fatal] 기준일이 {old_asof} → {out['asof']} 로 뒤로 갑니다. 갱신을 중단합니다.")
+        sys.exit(EXIT_DATA)
+
+    if same_data(old, out):
+        print(f"[skip] 새로 받은 데이터 없음 (asof={out['asof']}, days={len(dates)})")
+    else:
+        save_json(OUT_FILE, out)
+        print(f"[done] asof={out['asof']} days={len(dates)}")
+
+    if res["missing"]:
+        print("[fail] 데이터가 빈 거래일: " + ", ".join(res["missing"]))
+        sys.exit(EXIT_DATA)
+    if res["errors"]:
+        print(f"[warn] 이번 실행 오류 {len(res['errors'])}건 (마지막: {res['errors'][-1]})")
 
 
 if __name__ == "__main__":
